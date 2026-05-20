@@ -1,3 +1,4 @@
+from html import escape
 import json
 import os
 from pathlib import Path
@@ -5,6 +6,7 @@ from typing import Any
 
 import anthropic
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 
@@ -46,7 +48,20 @@ SYSTEM_PROMPT = """
 - сначала дай короткий практический вывод;
 - затем объясни логику;
 - если нужны данные от пользователя, задай конкретные вопросы списком.
+- используй только Telegram HTML-разметку: <b>жирный</b>, <i>курсив</i>, <u>подчеркивание</u>, <s>зачеркнутый</s>, <code>код</code>, <pre>блок кода</pre>, <blockquote>цитата</blockquote>;
+- не используй Markdown-разметку: #, ##, **жирный**, __подчеркивание__, ```code```, ---;
+- не используй HTML-теги h1, h2, h3, p, ul, ol, li, br, div, span;
+- заголовки оформляй жирным текстом, например <b>Что важно</b>;
+- списки оформляй обычными строками с символами "-", "1.", "2.";
+- экранируй символы <, > и & в обычном тексте, если они не являются разрешенными HTML-тегами.
 """.strip()
+
+
+async def reply_html(update: Update, text: str) -> None:
+    try:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text(text)
 
 
 def ensure_data_files() -> None:
@@ -99,22 +114,36 @@ def save_chat_history(chat_id: int, history: list[dict[str, str]]) -> None:
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Я налоговый ИИ-ассистент по России. Можешь задавать вопросы, а обучать меня можно командой:\n\n"
-        "/learn текст правила, выдержка из документа или твоя инструкция\n\n"
-        "Команды: /help, /knowledge, /reset"
+    await reply_html(
+        update,
+        "<b>Привет! Я - ИИ-ассистент по налогам в России</b>\n\n"
+        "<b>Что я умею</b>\n\n"
+        "Помогаю разобраться в налоговых вопросах для:\n\n"
+        "- Физических лиц: НДФЛ, вычеты, декларации, продажа имущества\n"
+        "- ИП: выбор режима, УСН, патент, страховые взносы\n"
+        "- Самозанятых: НПД, лимиты, чеки, совмещение с другими статусами\n"
+        "- Компаний: общие вопросы налогообложения, режимы\n\n"
+        "<b>Как я отвечаю</b>\n\n"
+        "1. <b>Сначала - практический вывод</b>: что делать\n"
+        "2. <b>Потом - объяснение логики</b>: почему именно так\n"
+        "3. <b>Задаю уточняющие вопросы</b>, если от деталей зависит ответ\n\n"
+        "<blockquote>Важно: я не юрист и не налоговый консультант. Я помогаю разобраться и сориентироваться, "
+        "но для ответственных решений рекомендую проверять актуальные нормы НК РФ или консультироваться со специалистом.</blockquote>\n\n"
+        "<b>Задавайте вопрос - постараюсь помочь!</b>\n\n"
+        "Команды: /help, /learn, /knowledge, /reset"
     )
 
 
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Как со мной работать:\n"
+    await reply_html(
+        update,
+        "<b>Как со мной работать</b>\n\n"
         "1. Задавай налоговые вопросы обычным сообщением.\n"
         "2. Добавляй знания через /learn. Например:\n"
-        "/learn Для ИП на УСН важно отдельно проверять лимиты доходов за нужный год.\n"
+        "<code>/learn Для ИП на УСН важно отдельно проверять лимиты доходов за нужный год.</code>\n"
         "3. Смотри последние добавленные знания через /knowledge.\n"
         "4. Сбрасывай историю текущего чата через /reset.\n\n"
-        "Для ограничения обучения только владельцем задай переменную TAX_BOT_OWNER_ID."
+        "Для ограничения обучения только владельцем задай переменную <code>TAX_BOT_OWNER_ID</code>."
     )
 
 
@@ -125,7 +154,11 @@ async def learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = " ".join(ctx.args).strip()
     if not text:
-        await update.message.reply_text("Пришли знание после команды. Например: /learn НДФЛ платят налоговые резиденты РФ...")
+        await reply_html(
+            update,
+            "Пришли знание после команды. Например:\n"
+            "<code>/learn НДФЛ платят налоговые резиденты РФ...</code>",
+        )
         return
 
     knowledge = read_json(KNOWLEDGE_FILE, [])
@@ -137,25 +170,25 @@ async def learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         }
     )
     write_json(KNOWLEDGE_FILE, knowledge)
-    await update.message.reply_text("Запомнил. Буду учитывать это в следующих ответах.")
+    await reply_html(update, "<b>Запомнил.</b> Буду учитывать это в следующих ответах.")
 
 
 async def knowledge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     items = read_json(KNOWLEDGE_FILE, [])
     if not items:
-        await update.message.reply_text("База знаний пока пустая. Добавь первое правило через /learn.")
+        await reply_html(update, "База знаний пока пустая. Добавь первое правило через /learn.")
         return
 
     recent = items[-10:]
-    lines = [f"{i}. {item['text']}" for i, item in enumerate(recent, start=1)]
-    await update.message.reply_text("Последние знания:\n\n" + "\n".join(lines))
+    lines = [f"{i}. {escape(item['text'])}" for i, item in enumerate(recent, start=1)]
+    await reply_html(update, "<b>Последние знания</b>\n\n" + "\n".join(lines))
 
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
     save_chat_history(update.effective_chat.id, [])
-    await update.message.reply_text("Историю этого чата сбросил. Базу знаний не трогал.")
+    await reply_html(update, "Историю этого чата сбросил. Базу знаний не трогал.")
 
 
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -185,7 +218,7 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     save_chat_history(chat_id, messages + [{"role": "assistant", "content": answer}])
-    await update.message.reply_text(answer)
+    await reply_html(update, answer)
 
 
 def main() -> None:
