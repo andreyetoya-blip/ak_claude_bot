@@ -1,2 +1,5 @@
 anthropic
 python-telegram-bot
+httpx
+gspread
+google-auth

@@ -1,0 +1,19 @@
+# Credentials — never commit
+google_credentials.json
+*.json.key
+
+# Sync state (local machine only)
+sync_state.json
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Env files
+.env
+.env.*
