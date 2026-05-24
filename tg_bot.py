@@ -13,8 +13,11 @@ from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 import calendar_tools
+import docs_tools
 import drive_tools
 import google_auth
+import sheets_tools
+import slides_tools
 
 
 MAX_TOOL_ITERATIONS = 8
@@ -24,8 +27,20 @@ WEB_TOOLS: list[dict[str, Any]] = [
     {"type": "web_fetch_20260209", "name": "web_fetch"},
 ]
 
-ALL_TOOL_SCHEMAS = calendar_tools.TOOL_SCHEMAS + drive_tools.TOOL_SCHEMAS
-ALL_TOOL_HANDLERS = {**calendar_tools.TOOL_HANDLERS, **drive_tools.TOOL_HANDLERS}
+ALL_TOOL_SCHEMAS = (
+    calendar_tools.TOOL_SCHEMAS
+    + drive_tools.TOOL_SCHEMAS
+    + sheets_tools.TOOL_SCHEMAS
+    + docs_tools.TOOL_SCHEMAS
+    + slides_tools.TOOL_SCHEMAS
+)
+ALL_TOOL_HANDLERS = {
+    **calendar_tools.TOOL_HANDLERS,
+    **drive_tools.TOOL_HANDLERS,
+    **sheets_tools.TOOL_HANDLERS,
+    **docs_tools.TOOL_HANDLERS,
+    **slides_tools.TOOL_HANDLERS,
+}
 
 
 def dispatch_tool(name: str, arguments: dict) -> Any:
@@ -73,11 +88,26 @@ SYSTEM_PROMPT = """
 - время в инструментах передавай в ISO 8601 с таймзоной (например 2026-05-26T14:00:00+03:00); таймзона Андрея указана в контексте ниже;
 - относительные даты («завтра», «в следующий понедельник») всегда считай от «сейчас» из контекста — не угадывай.
 
-Работа с Google Drive:
-- доступ только на чтение метаданных: ты видишь название, mime-type, владельца, даты, размер, ссылку — но НЕ содержимое файла;
-- если Андрей просит «найти файл», используй list_drive_files с подходящим фильтром (имя, тип, дата);
-- в ответе давай ссылку на файл (поле link), кратко перечисляй: название, кто владелец, когда менялся;
-- если Андрей просит пересказать содержимое файла — честно скажи, что прав на содержимое нет, и предложи открыть по ссылке.
+Работа с Google Drive / Docs / Sheets / Slides:
+- доступ полный: чтение, создание, изменение, удаление. Файлы, таблицы, документы, презентации.
+- поиск файлов: list_drive_files (фильтры по имени/типу/дате).
+- чтение: read_drive_file_text (универсально, как plain text), read_doc (Docs), read_sheet_values + list_sheet_tabs (Sheets, структурно), read_slides_text (Slides).
+- для таблиц всегда предпочитай Sheets-инструменты (read_sheet_values), а не read_drive_file_text — получишь структурные строки, а не CSV-строку.
+- для Docs — read_doc, а не read_drive_file_text.
+
+КРИТИЧЕСКОЕ ПРАВИЛО ПОДТВЕРЖДЕНИЯ ПЕРЕД ЛЮБОЙ ЗАПИСЬЮ:
+- любой инструмент, у которого в описании есть слово ЗАПИСЬ (create_*, update_*, append_*, replace_*, rename_*, move_*, delete_*, clear_*), НИКОГДА не вызывай без явного согласия Андрея в текущей переписке;
+- алгоритм: сначала сходи в чтение, собери контекст, потом сформулируй конкретное предложение («хочу <действие> в файле "<название>" — <детали изменения>, ок?»), и ЖДИ ответа;
+- только после явного «да», «делай», «ок» или эквивалента — вызывай write-инструмент;
+- если Андрей попросил «измени» / «добавь» — это запрос, а не подтверждение. Сначала уточни и подтверди, потом действуй.
+
+Удаление файлов в Google Drive отключено:
+- инструмента delete_drive_file нет, удалять файлы ты не можешь;
+- если Андрей просит удалить файл, скажи прямо: «удаление файлов отключено» и предложи альтернативы — переименовать (rename_drive_file), переместить в архивную папку (move_drive_file), либо открыть файл по ссылке и удалить вручную.
+
+Содержимое файлов:
+- бинарные форматы (PDF-контент, изображения) пока не читаешь — отдавай ссылку и предлагай открыть;
+- если запрос неоднозначен, какой именно файл (несколько с похожими названиями) — покажи список через list_drive_files и спроси, какой.
 
 Как ты работаешь:
 - ведёшь себя как опытный ассистент, а не как болталка: коротко, по делу, с инициативой;
@@ -254,9 +284,11 @@ def build_system_prompt() -> str:
     if google_auth.is_configured():
         parts.append(
             f"Google-интеграции подключены. "
-            f"Календарь: id={calendar_tools.DEFAULT_CALENDAR_ID}, "
-            "инструменты list_events / create_event / update_event / delete_event / find_free_slots. "
-            "Drive (только метаданные): list_drive_files / get_drive_file."
+            f"Календарь (id={calendar_tools.DEFAULT_CALENDAR_ID}): list_events / create_event / update_event / delete_event / find_free_slots. "
+            "Drive: list_drive_files / get_drive_file / read_drive_file_text / create_drive_text_file / update_drive_file_content / rename_drive_file / move_drive_file / create_drive_folder. "
+            "Sheets: list_sheet_tabs / read_sheet_values / update_sheet_values / append_sheet_rows / clear_sheet_values / create_sheet. "
+            "Docs: read_doc / append_to_doc / replace_in_doc / create_doc. "
+            "Slides: read_slides_text / create_presentation."
         )
     else:
         parts.append("Google-интеграции сейчас не подключены — отвечай без обращения к ним.")
