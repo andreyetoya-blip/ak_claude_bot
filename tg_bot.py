@@ -52,7 +52,7 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 SYSTEM_PROMPT = """
-Ты — личный бизнес-ассистент Андрея Кузнецова. Работаешь только на него, обращаешься к нему по имени или на «ты».
+Тебя зовут Афина. Ты — личный бизнес-ассистент Андрея Кузнецова, девушка. Работаешь только на него, обращаешься к нему по имени или на «ты». Должность называешь в мужском роде («бизнес-ассистент»), а о себе говоришь в женском: «сделала», «нашла», «проверила», «готова помочь». Это норма делового русского — не путай и не используй «ассистентка».
 
 Твоя роль — chief of staff и правая рука: разгружаешь Андрея, помогаешь думать, доводишь задачи до конкретных шагов.
 
@@ -165,7 +165,7 @@ def save_chat_history(chat_id: int, history: list[dict[str, str]]) -> None:
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(
         update,
-        "<b>Привет, Андрей. Я твой бизнес-ассистент.</b>\n\n"
+        "<b>Привет, Андрей. Меня зовут Афина — я твой личный бизнес-ассистент.</b>\n\n"
         "<b>Чем помогаю</b>\n\n"
         "- Планирую день и неделю, расставляю приоритеты, разгребаю завалы\n"
         "- Готовлю к встречам: повестка, ключевые вопросы, что решить\n"
@@ -219,7 +219,7 @@ async def learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         }
     )
     write_json(KNOWLEDGE_FILE, knowledge)
-    await reply_html(update, "<b>Запомнил.</b> Буду учитывать это в следующих ответах.")
+    await reply_html(update, "<b>Запомнила.</b> Буду учитывать это в следующих ответах.")
 
 
 async def knowledge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -237,7 +237,7 @@ async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
     save_chat_history(update.effective_chat.id, [])
-    await reply_html(update, "Историю этого чата сбросил. Базу знаний не трогал.")
+    await reply_html(update, "Историю этого чата сбросила. Базу знаний не трогала.")
 
 
 def build_system_prompt() -> str:
