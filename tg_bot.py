@@ -1,13 +1,21 @@
+import asyncio
+from datetime import datetime
 from html import escape
 import json
 import os
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import anthropic
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+
+import calendar_tools
+
+
+MAX_TOOL_ITERATIONS = 8
 
 
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
@@ -33,12 +41,19 @@ SYSTEM_PROMPT = """
 
 Чем помогаешь:
 - планирование дня, недели, приоритизация задач, разбор завалов;
+- работа с Google Calendar Андрея через инструменты: смотреть расписание, искать свободные окна, создавать/менять/удалять события;
 - подготовка к встречам: повестка, ключевые вопросы, что выяснить, что решить;
 - драфты писем, сообщений, постов, коммерческих предложений на русском и английском;
 - структурирование мыслей: brain dump → понятный план или документ;
 - разбор решений: за/против, риски, что упускаем, какой вопрос задать себе ещё;
 - поиск формулировок, проверка тона, краткие пересказы длинных текстов;
 - запоминание контекста через /learn: люди, проекты, договорённости, привычки Андрея, его стиль.
+
+Работа с календарём:
+- если вопрос касается расписания, встреч, свободного времени — сначала проверь календарь инструментами, потом отвечай по факту, а не по предположению;
+- при создании или удалении события сверься с Андреем по сути (название, время, участники) одним коротким сообщением, если есть малейшая неоднозначность;
+- время в инструментах передавай в ISO 8601 с таймзоной (например 2026-05-26T14:00:00+03:00); таймзона Андрея указана в контексте ниже;
+- относительные даты («завтра», «в следующий понедельник») всегда считай от «сейчас» из контекста — не угадывай.
 
 Как ты работаешь:
 - ведёшь себя как опытный ассистент, а не как болталка: коротко, по делу, с инициативой;
@@ -201,6 +216,77 @@ async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update, "Историю этого чата сбросил. Базу знаний не трогал.")
 
 
+def build_system_prompt() -> str:
+    tz_name = calendar_tools.DEFAULT_TZ
+    try:
+        now = datetime.now(ZoneInfo(tz_name)).isoformat(timespec="minutes")
+    except Exception:
+        now = datetime.now().isoformat(timespec="minutes")
+
+    parts = [
+        SYSTEM_PROMPT,
+        f"Текущее время Андрея ({tz_name}): {now}.",
+    ]
+    if calendar_tools.is_configured():
+        parts.append(
+            f"Календарь подключён (Google Calendar, id={calendar_tools.DEFAULT_CALENDAR_ID}). "
+            "Используй инструменты list_events / create_event / update_event / delete_event / find_free_slots."
+        )
+    else:
+        parts.append("Календарь сейчас не подключён — отвечай без обращения к нему.")
+
+    parts.append(f"База знаний, добавленная владельцем:\n{build_knowledge_context()}")
+    return "\n\n".join(parts)
+
+
+def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
+    tools = calendar_tools.TOOL_SCHEMAS if calendar_tools.is_configured() else None
+    convo: list[dict[str, Any]] = list(messages)
+
+    for _ in range(MAX_TOOL_ITERATIONS):
+        kwargs: dict[str, Any] = {
+            "model": MODEL,
+            "max_tokens": 1600,
+            "system": system,
+            "messages": convo,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        response = client.messages.create(**kwargs)
+
+        if response.stop_reason != "tool_use":
+            return "".join(
+                block.text for block in response.content if getattr(block, "type", None) == "text"
+            ).strip()
+
+        convo.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for block in response.content:
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            try:
+                result = calendar_tools.dispatch(block.name, dict(block.input))
+                content = json.dumps(result, ensure_ascii=False, default=str)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": content}
+                )
+            except Exception as exc:
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Ошибка инструмента {block.name}: {exc}",
+                        "is_error": True,
+                    }
+                )
+
+        convo.append({"role": "user", "content": tool_results})
+
+    return "Не получилось завершить запрос — слишком много шагов с инструментами. Попробуй сформулировать иначе."
+
+
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text or not update.effective_chat:
         return
@@ -208,21 +294,11 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text.strip()
     chat_id = update.effective_chat.id
     history = get_chat_history(chat_id)
-
     messages = history + [{"role": "user", "content": user_text}]
-    system = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"База знаний, добавленная владельцем:\n{build_knowledge_context()}"
-    )
+    system = build_system_prompt()
 
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1600,
-            system=system,
-            messages=messages,
-        )
-        answer = response.content[0].text
+        answer = await asyncio.to_thread(run_with_tools, messages, system)
     except Exception as exc:
         await update.message.reply_text(f"Не смог получить ответ от модели: {exc}")
         return
