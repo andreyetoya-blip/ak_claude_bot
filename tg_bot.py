@@ -19,6 +19,11 @@ import google_auth
 
 MAX_TOOL_ITERATIONS = 8
 
+WEB_TOOLS: list[dict[str, Any]] = [
+    {"type": "web_search_20260209", "name": "web_search"},
+    {"type": "web_fetch_20260209", "name": "web_fetch"},
+]
+
 ALL_TOOL_SCHEMAS = calendar_tools.TOOL_SCHEMAS + drive_tools.TOOL_SCHEMAS
 ALL_TOOL_HANDLERS = {**calendar_tools.TOOL_HANDLERS, **drive_tools.TOOL_HANDLERS}
 
@@ -256,25 +261,33 @@ def build_system_prompt() -> str:
     else:
         parts.append("Google-интеграции сейчас не подключены — отвечай без обращения к ним.")
 
+    parts.append(
+        "Доступ в интернет: инструменты web_search (поиск) и web_fetch (загрузка конкретной страницы). "
+        "Используй их, когда вопрос требует свежей или внешней информации (новости, цены, документация, факты после твоего обучения). "
+        "Не угадывай и не выдумывай — лучше сходи в веб."
+    )
+
     parts.append(f"База знаний, добавленная владельцем:\n{build_knowledge_context()}")
     return "\n\n".join(parts)
 
 
 def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
-    tools = ALL_TOOL_SCHEMAS if google_auth.is_configured() else None
+    google_tools = ALL_TOOL_SCHEMAS if google_auth.is_configured() else []
+    tools = google_tools + WEB_TOOLS
     convo: list[dict[str, Any]] = list(messages)
 
     for _ in range(MAX_TOOL_ITERATIONS):
-        kwargs: dict[str, Any] = {
-            "model": MODEL,
-            "max_tokens": 1600,
-            "system": system,
-            "messages": convo,
-        }
-        if tools:
-            kwargs["tools"] = tools
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            system=system,
+            messages=convo,
+            tools=tools,
+        )
 
-        response = client.messages.create(**kwargs)
+        if response.stop_reason == "pause_turn":
+            convo.append({"role": "assistant", "content": response.content})
+            continue
 
         if response.stop_reason != "tool_use":
             return "".join(
@@ -302,6 +315,9 @@ def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
                         "is_error": True,
                     }
                 )
+
+        if not tool_results:
+            continue
 
         convo.append({"role": "user", "content": tool_results})
 
