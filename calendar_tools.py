@@ -1,11 +1,9 @@
 """Тонкая обёртка над Google Calendar API для использования из tg_bot.py.
 
-Авторизация — через refresh token, хранящийся в env vars:
-    GOOGLE_CLIENT_ID
-    GOOGLE_CLIENT_SECRET
-    GOOGLE_REFRESH_TOKEN
-    GOOGLE_CALENDAR_ID  (опционально, по умолчанию "primary")
-    GOOGLE_CALENDAR_TZ  (опционально, по умолчанию "Europe/Moscow")
+Авторизация — через общий модуль google_auth.
+Дополнительные опциональные env vars:
+    GOOGLE_CALENDAR_ID  (по умолчанию "primary")
+    GOOGLE_CALENDAR_TZ  (по умолчанию "Europe/Moscow")
 """
 
 import os
@@ -13,34 +11,17 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+import google_auth
+
 DEFAULT_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 DEFAULT_TZ = os.getenv("GOOGLE_CALENDAR_TZ", "Europe/Moscow")
 
 
-def is_configured() -> bool:
-    return all(
-        os.getenv(name)
-        for name in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
-    )
-
-
 @lru_cache(maxsize=1)
 def _service() -> Any:
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        scopes=SCOPES,
-    )
-    creds.refresh(Request())
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return build("calendar", "v3", credentials=google_auth.get_credentials(), cache_discovery=False)
 
 
 def _parse_iso(value: str) -> datetime:

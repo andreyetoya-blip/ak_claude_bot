@@ -17,7 +17,7 @@ from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+from google_auth import SCOPES
 
 
 def main() -> None:

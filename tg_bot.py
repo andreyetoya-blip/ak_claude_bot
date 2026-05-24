@@ -13,9 +13,21 @@ from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 import calendar_tools
+import drive_tools
+import google_auth
 
 
 MAX_TOOL_ITERATIONS = 8
+
+ALL_TOOL_SCHEMAS = calendar_tools.TOOL_SCHEMAS + drive_tools.TOOL_SCHEMAS
+ALL_TOOL_HANDLERS = {**calendar_tools.TOOL_HANDLERS, **drive_tools.TOOL_HANDLERS}
+
+
+def dispatch_tool(name: str, arguments: dict) -> Any:
+    handler = ALL_TOOL_HANDLERS.get(name)
+    if handler is None:
+        raise ValueError(f"Неизвестный инструмент: {name}")
+    return handler(**arguments)
 
 
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
@@ -42,6 +54,7 @@ SYSTEM_PROMPT = """
 Чем помогаешь:
 - планирование дня, недели, приоритизация задач, разбор завалов;
 - работа с Google Calendar Андрея через инструменты: смотреть расписание, искать свободные окна, создавать/менять/удалять события;
+- работа с Google Drive Андрея через инструменты (только метаданные, без содержимого): находить файлы по названию/типу/дате, давать ссылки;
 - подготовка к встречам: повестка, ключевые вопросы, что выяснить, что решить;
 - драфты писем, сообщений, постов, коммерческих предложений на русском и английском;
 - структурирование мыслей: brain dump → понятный план или документ;
@@ -54,6 +67,12 @@ SYSTEM_PROMPT = """
 - при создании или удалении события сверься с Андреем по сути (название, время, участники) одним коротким сообщением, если есть малейшая неоднозначность;
 - время в инструментах передавай в ISO 8601 с таймзоной (например 2026-05-26T14:00:00+03:00); таймзона Андрея указана в контексте ниже;
 - относительные даты («завтра», «в следующий понедельник») всегда считай от «сейчас» из контекста — не угадывай.
+
+Работа с Google Drive:
+- доступ только на чтение метаданных: ты видишь название, mime-type, владельца, даты, размер, ссылку — но НЕ содержимое файла;
+- если Андрей просит «найти файл», используй list_drive_files с подходящим фильтром (имя, тип, дата);
+- в ответе давай ссылку на файл (поле link), кратко перечисляй: название, кто владелец, когда менялся;
+- если Андрей просит пересказать содержимое файла — честно скажи, что прав на содержимое нет, и предложи открыть по ссылке.
 
 Как ты работаешь:
 - ведёшь себя как опытный ассистент, а не как болталка: коротко, по делу, с инициативой;
@@ -227,20 +246,22 @@ def build_system_prompt() -> str:
         SYSTEM_PROMPT,
         f"Текущее время Андрея ({tz_name}): {now}.",
     ]
-    if calendar_tools.is_configured():
+    if google_auth.is_configured():
         parts.append(
-            f"Календарь подключён (Google Calendar, id={calendar_tools.DEFAULT_CALENDAR_ID}). "
-            "Используй инструменты list_events / create_event / update_event / delete_event / find_free_slots."
+            f"Google-интеграции подключены. "
+            f"Календарь: id={calendar_tools.DEFAULT_CALENDAR_ID}, "
+            "инструменты list_events / create_event / update_event / delete_event / find_free_slots. "
+            "Drive (только метаданные): list_drive_files / get_drive_file."
         )
     else:
-        parts.append("Календарь сейчас не подключён — отвечай без обращения к нему.")
+        parts.append("Google-интеграции сейчас не подключены — отвечай без обращения к ним.")
 
     parts.append(f"База знаний, добавленная владельцем:\n{build_knowledge_context()}")
     return "\n\n".join(parts)
 
 
 def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
-    tools = calendar_tools.TOOL_SCHEMAS if calendar_tools.is_configured() else None
+    tools = ALL_TOOL_SCHEMAS if google_auth.is_configured() else None
     convo: list[dict[str, Any]] = list(messages)
 
     for _ in range(MAX_TOOL_ITERATIONS):
@@ -267,7 +288,7 @@ def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
             if getattr(block, "type", None) != "tool_use":
                 continue
             try:
-                result = calendar_tools.dispatch(block.name, dict(block.input))
+                result = dispatch_tool(block.name, dict(block.input))
                 content = json.dumps(result, ensure_ascii=False, default=str)
                 tool_results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": content}
