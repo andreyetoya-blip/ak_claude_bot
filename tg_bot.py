@@ -152,8 +152,7 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "<code>/learn Партнёр по проекту X — Иван Петров, общаемся в Telegram, любит короткие сообщения.</code>\n"
         "<code>/learn По понедельникам утром у меня недельное планирование, не назначать встречи до 11:00.</code>\n"
         "3. /knowledge — последние добавленные заметки.\n"
-        "4. /reset — сбросить историю текущего чата (база знаний останется).\n"
-        "5. /forget — полностью очистить базу знаний.\n\n"
+        "4. /reset — сбросить историю текущего чата (база знаний останется).\n\n"
         "Чтобы ассистент отвечал только тебе, задай переменную окружения <code>ASSISTANT_OWNER_ID</code> с твоим Telegram ID."
     )
 
@@ -202,14 +201,6 @@ async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update, "Историю этого чата сбросил. Базу знаний не трогал.")
 
 
-async def forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_owner(update):
-        await update.message.reply_text("Чистить базу знаний может только владелец.")
-        return
-    write_json(KNOWLEDGE_FILE, [])
-    await reply_html(update, "Базу знаний полностью очистил. Историю чатов не трогал — для этого /reset.")
-
-
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text or not update.effective_chat:
         return
@@ -248,7 +239,6 @@ def main() -> None:
     app.add_handler(CommandHandler("learn", learn))
     app.add_handler(CommandHandler("knowledge", knowledge))
     app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(CommandHandler("forget", forget))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.run_polling()
 
