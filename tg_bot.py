@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from functools import wraps
 from html import escape
 import json
 import os
@@ -13,6 +14,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 import calendar_tools
+import context_tools
 import docs_tools
 import drive_tools
 import google_auth
@@ -33,6 +35,7 @@ ALL_TOOL_SCHEMAS = (
     + sheets_tools.TOOL_SCHEMAS
     + docs_tools.TOOL_SCHEMAS
     + slides_tools.TOOL_SCHEMAS
+    + context_tools.TOOL_SCHEMAS
 )
 ALL_TOOL_HANDLERS = {
     **calendar_tools.TOOL_HANDLERS,
@@ -40,6 +43,7 @@ ALL_TOOL_HANDLERS = {
     **sheets_tools.TOOL_HANDLERS,
     **docs_tools.TOOL_HANDLERS,
     **slides_tools.TOOL_HANDLERS,
+    **context_tools.TOOL_HANDLERS,
 }
 
 
@@ -81,6 +85,14 @@ SYSTEM_PROMPT = """
 - разбор решений: за/против, риски, что упускаем, какой вопрос задать себе ещё;
 - поиск формулировок, проверка тона, краткие пересказы длинных текстов;
 - запоминание контекста через /learn: люди, проекты, договорённости, привычки Андрея, его стиль.
+
+Личная библиотека (контекст об Андрее, лазивая подгрузка):
+- В системном промпте ниже есть «Личная библиотека» — это оглавление: список тем + описание + когда читать.
+- Содержимое тем НЕ загружено автоматически. Чтобы прочитать тему — вызывай read_context_topic(topic_id).
+- Когда обращаться к библиотеке: для задач, где важна личность Андрея — драфты писем, рекомендации, помощь в решениях, аналитика, любые вопросы про его бизнес или экспертизу.
+- Когда библиотека НЕ нужна: технические задачи (поиск в интернете, запись/чтение календаря, навигация по Drive, простые ответы на фактологические вопросы). Тут читать темы — пустая трата токенов.
+- Если сомневаешься — сначала прочитай andrey_brief (короткий, дешёвый, даёт основу). Деталь подгружай только если конкретно нужна.
+- Не пересказывай Андрею содержимое библиотеки как справку о нём. Он сам знает. Используй для качества ответа.
 
 Работа с календарём:
 - если вопрос касается расписания, встреч, свободного времени — сначала проверь календарь инструментами, потом отвечай по факту, а не по предположению;
@@ -169,6 +181,18 @@ def is_owner(update: Update) -> bool:
     return bool(user and str(user.id) == OWNER_ID)
 
 
+def require_owner(func):
+    @wraps(func)
+    async def wrapped(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if is_owner(update):
+            return await func(update, ctx)
+        if update.message:
+            await update.message.reply_text(
+                "Здравствуйте. Это приватный ассистент Андрея Кузнецова. Доступа у вас нет."
+            )
+    return wrapped
+
+
 def build_knowledge_context() -> str:
     knowledge = read_json(KNOWLEDGE_FILE, [])
     if not knowledge:
@@ -192,6 +216,7 @@ def save_chat_history(chat_id: int, history: list[dict[str, str]]) -> None:
     write_json(MEMORY_FILE, memory)
 
 
+@require_owner
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(
         update,
@@ -212,6 +237,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@require_owner
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(
         update,
@@ -226,11 +252,8 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@require_owner
 async def learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_owner(update):
-        await update.message.reply_text("Обучать меня может только владелец бота.")
-        return
-
     text = " ".join(ctx.args).strip()
     if not text:
         await reply_html(
@@ -252,6 +275,7 @@ async def learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update, "<b>Запомнила.</b> Буду учитывать это в следующих ответах.")
 
 
+@require_owner
 async def knowledge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     items = read_json(KNOWLEDGE_FILE, [])
     if not items:
@@ -263,6 +287,7 @@ async def knowledge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update, "<b>Последние знания</b>\n\n" + "\n".join(lines))
 
 
+@require_owner
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
@@ -288,7 +313,8 @@ def build_system_prompt() -> str:
             "Drive: list_drive_files / get_drive_file / read_drive_file_text / create_drive_text_file / update_drive_file_content / rename_drive_file / move_drive_file / create_drive_folder. "
             "Sheets: list_sheet_tabs / read_sheet_values / update_sheet_values / append_sheet_rows / clear_sheet_values / create_sheet. "
             "Docs: read_doc / append_to_doc / replace_in_doc / create_doc. "
-            "Slides: read_slides_text / create_presentation."
+            "Slides: read_slides_text / create_presentation. "
+            "Личная библиотека Андрея: list_context_topics / read_context_topic."
         )
     else:
         parts.append("Google-интеграции сейчас не подключены — отвечай без обращения к ним.")
@@ -299,7 +325,14 @@ def build_system_prompt() -> str:
         "Не угадывай и не выдумывай — лучше сходи в веб."
     )
 
-    parts.append(f"База знаний, добавленная владельцем:\n{build_knowledge_context()}")
+    manifest = context_tools.build_manifest_for_prompt()
+    if manifest:
+        parts.append(
+            "Личная библиотека об Андрее (читаешь по требованию через read_context_topic, "
+            "не грузится автоматически):\n" + manifest
+        )
+
+    parts.append(f"База знаний, добавленная владельцем через /learn:\n{build_knowledge_context()}")
     return "\n\n".join(parts)
 
 
@@ -356,6 +389,7 @@ def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
     return "Не получилось завершить запрос — слишком много шагов с инструментами. Попробуй сформулировать иначе."
 
 
+@require_owner
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text or not update.effective_chat:
         return
