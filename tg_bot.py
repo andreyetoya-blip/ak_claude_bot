@@ -20,6 +20,7 @@ import drive_tools
 import google_auth
 import sheets_tools
 import slides_tools
+import telemost_tools
 
 
 MAX_TOOL_ITERATIONS = 8
@@ -44,6 +45,7 @@ ALL_TOOL_HANDLERS = {
     **docs_tools.TOOL_HANDLERS,
     **slides_tools.TOOL_HANDLERS,
     **context_tools.TOOL_HANDLERS,
+    **telemost_tools.TOOL_HANDLERS,
 }
 
 
@@ -106,6 +108,15 @@ SYSTEM_PROMPT = """
 - чтение: read_drive_file_text (универсально, как plain text), read_doc (Docs), read_sheet_values + list_sheet_tabs (Sheets, структурно), read_slides_text (Slides).
 - для таблиц всегда предпочитай Sheets-инструменты (read_sheet_values), а не read_drive_file_text — получишь структурные строки, а не CSV-строку.
 - для Docs — read_doc, а не read_drive_file_text.
+
+Онлайн-встречи в Яндекс.Телемост:
+- инструмент create_telemost_meeting создаёт встречу в Телемосте (учётка a@kipfinance.ru) и возвращает ссылку для подключения;
+- если подключён Google Calendar, инструмент дополнительно создаёт событие на указанное московское время с этой ссылкой — отдельно create_event для этого вызывать не нужно;
+- на вход нужны название и время начала. Время передавай в ISO 8601 с московской таймзоной (+03:00), например 2026-06-18T15:00:00+03:00 — Андрей всегда называет время по Москве;
+- если длительность не названа — не переспрашивай, ставь 60 минут (duration_minutes по умолчанию);
+- по умолчанию доступ PUBLIC (любой по ссылке). ORGANIZATION ставь только если Андрей явно просит встречу для своих;
+- это инструмент ЗАПИСИ. Если Андрей прямо просит создать встречу с конкретным названием и временем — это и есть согласие, создавай сразу, не устраивай лишнее подтверждение. Уточняй только при реальной неоднозначности (непонятно название, дата или время);
+- в ответ пришли название, дату и время по Москве и саму ссылку для подключения.
 
 КРИТИЧЕСКОЕ ПРАВИЛО ПОДТВЕРЖДЕНИЯ ПЕРЕД ЛЮБОЙ ЗАПИСЬЮ:
 - любой инструмент, у которого в описании есть слово ЗАПИСЬ (create_*, update_*, append_*, replace_*, rename_*, move_*, delete_*, clear_*), НИКОГДА не вызывай без явного согласия Андрея в текущей переписке;
@@ -319,6 +330,16 @@ def build_system_prompt() -> str:
     else:
         parts.append("Google-интеграции сейчас не подключены — отвечай без обращения к ним.")
 
+    if telemost_tools.is_configured():
+        parts.append(
+            "Яндекс.Телемост подключён (учётка a@kipfinance.ru): create_telemost_meeting — "
+            "создаёт онлайн-встречу и возвращает ссылку, время по Москве (+03:00)."
+        )
+    else:
+        parts.append(
+            "Яндекс.Телемост сейчас не подключён (нет токена) — создать встречу в Телемосте не получится."
+        )
+
     parts.append(
         "Доступ в интернет: инструменты web_search (поиск) и web_fetch (загрузка конкретной страницы). "
         "Используй их, когда вопрос требует свежей или внешней информации (новости, цены, документация, факты после твоего обучения). "
@@ -338,7 +359,8 @@ def build_system_prompt() -> str:
 
 def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
     google_tools = ALL_TOOL_SCHEMAS if google_auth.is_configured() else []
-    tools = google_tools + WEB_TOOLS
+    telemost_schemas = telemost_tools.TOOL_SCHEMAS if telemost_tools.is_configured() else []
+    tools = google_tools + telemost_schemas + WEB_TOOLS
     convo: list[dict[str, Any]] = list(messages)
 
     for _ in range(MAX_TOOL_ITERATIONS):
