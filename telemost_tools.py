@@ -13,7 +13,9 @@ https://oauth.yandex.ru/ со scope telemost-api:conferences.create (плюс .r
 и .update при желании), авторизоваться под a@kipfinance.ru и сохранить токен.
 """
 
+import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,11 +24,14 @@ import httpx
 import calendar_tools
 import google_auth
 
+logger = logging.getLogger(__name__)
+
 API_URL = "https://cloud-api.yandex.net/v1/telemost-api/conferences"
 TOKEN_ENV = "YANDEX_TELEMOST_TOKEN"
 
 DEFAULT_DURATION_MINUTES = 60
 DEFAULT_ACCESS_LEVEL = "PUBLIC"
+CALENDAR_RETRIES = 2
 
 
 def is_configured() -> bool:
@@ -50,6 +55,22 @@ def _create_conference(access_level: str = DEFAULT_ACCESS_LEVEL) -> dict:
             f"Telemost API вернул {resp.status_code}: {resp.text[:500]}"
         )
     return resp.json()
+
+
+def _create_event_with_retry(**kwargs) -> dict:
+    """Создать событие в календаре с парой повторов на случай разовых сбоев Google."""
+    last_exc: Exception | None = None
+    for attempt in range(1, CALENDAR_RETRIES + 1):
+        try:
+            return calendar_tools.create_event(**kwargs)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "create_event failed (попытка %d/%d): %s", attempt, CALENDAR_RETRIES, exc
+            )
+            if attempt < CALENDAR_RETRIES:
+                time.sleep(1.0 * attempt)
+    raise last_exc  # type: ignore[misc]
 
 
 def _compute_end(start: str, end: str | None, duration_minutes: int | None) -> str:
@@ -95,7 +116,7 @@ def create_telemost_meeting(
     if google_auth.is_configured():
         description = f"Онлайн-встреча в Яндекс.Телемост\nСсылка для подключения: {join_url}"
         try:
-            event = calendar_tools.create_event(
+            event = _create_event_with_retry(
                 summary=summary,
                 start=start,
                 end=end_value,
@@ -106,7 +127,13 @@ def create_telemost_meeting(
             result["calendar_event_link"] = event.get("html_link")
             result["calendar_event_id"] = event.get("id")
         except Exception as exc:
+            logger.exception("Не удалось создать событие календаря для встречи '%s'", summary)
             result["calendar_event_error"] = str(exc)
+            result["warning"] = (
+                "ВНИМАНИЕ: встреча в Телемосте создана и ссылка работает, "
+                "но событие в Google Calendar НЕ создано из-за ошибки. "
+                "Обязательно сообщи об этом Андрею и предложи добавить событие вручную или повторить."
+            )
 
     return result
 

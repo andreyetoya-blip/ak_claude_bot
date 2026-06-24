@@ -3,6 +3,7 @@ from datetime import datetime
 from functools import wraps
 from html import escape
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ DATA_DIR = BASE_DIR / "data"
 KNOWLEDGE_FILE = DATA_DIR / "knowledge_base.json"
 MEMORY_FILE = DATA_DIR / "chat_memory.json"
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=3)
 
 
 SYSTEM_PROMPT = """
@@ -424,7 +425,15 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         answer = await asyncio.to_thread(run_with_tools, messages, system)
+    except (anthropic.APIStatusError, anthropic.APIConnectionError):
+        logging.exception("Сбой Anthropic API при обработке сообщения")
+        await update.message.reply_text(
+            "Сервис модели сейчас недоступен (временный сбой на стороне Anthropic). "
+            "Попробуй отправить запрос ещё раз через минуту."
+        )
+        return
     except Exception as exc:
+        logging.exception("Не удалось получить ответ от модели")
         await update.message.reply_text(f"Не смог получить ответ от модели: {exc}")
         return
 
@@ -433,6 +442,10 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     ensure_data_files()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
