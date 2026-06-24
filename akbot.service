@@ -1,0 +1,17 @@
+[Unit]
+Description=AK Claude Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akbot
+Group=akbot
+WorkingDirectory=/opt/akbot/app
+EnvironmentFile=/opt/akbot/app/.env
+ExecStart=/opt/akbot/app/.venv/bin/python tg_bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
