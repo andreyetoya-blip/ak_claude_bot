@@ -61,7 +61,7 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OWNER_ID = os.getenv("ASSISTANT_OWNER_ID")
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_HISTORY_MESSAGES = 12
 MAX_KNOWLEDGE_ITEMS = 60
 
