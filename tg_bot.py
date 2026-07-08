@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import anthropic
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -19,17 +18,11 @@ import context_tools
 import docs_tools
 import drive_tools
 import google_auth
+import llm_provider
 import sheets_tools
 import slides_tools
 import telemost_tools
 
-
-MAX_TOOL_ITERATIONS = 8
-
-WEB_TOOLS: list[dict[str, Any]] = [
-    {"type": "web_search_20260209", "name": "web_search"},
-    {"type": "web_fetch_20260209", "name": "web_fetch"},
-]
 
 ALL_TOOL_SCHEMAS = (
     calendar_tools.TOOL_SCHEMAS
@@ -57,11 +50,9 @@ def dispatch_tool(name: str, arguments: dict) -> Any:
     return handler(**arguments)
 
 
-ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OWNER_ID = os.getenv("ASSISTANT_OWNER_ID")
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_HISTORY_MESSAGES = 12
 MAX_KNOWLEDGE_ITEMS = 60
 
@@ -69,8 +60,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 KNOWLEDGE_FILE = DATA_DIR / "knowledge_base.json"
 MEMORY_FILE = DATA_DIR / "chat_memory.json"
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=3)
+SETTINGS_FILE = DATA_DIR / "settings.json"
 
 
 SYSTEM_PROMPT = """
@@ -228,6 +218,16 @@ def save_chat_history(chat_id: int, history: list[dict[str, str]]) -> None:
     write_json(MEMORY_FILE, memory)
 
 
+def load_settings() -> dict[str, Any]:
+    return read_json(SETTINGS_FILE, {})
+
+
+def save_setting(key: str, value: Any) -> None:
+    settings = load_settings()
+    settings[key] = value
+    write_json(SETTINGS_FILE, settings)
+
+
 @require_owner
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(
@@ -245,7 +245,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "2. Через /learn добавляй то, что я должен помнить всегда\n"
         "3. /reset — очистить историю текущего чата\n\n"
         "<blockquote>Я работаю только на тебя. Стараюсь экономить твоё время: коротко, по делу, с готовым предложением.</blockquote>\n\n"
-        "Команды: /help, /learn, /knowledge, /reset"
+        "Команды: /help, /learn, /knowledge, /reset, /model"
     )
 
 
@@ -259,7 +259,8 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "<code>/learn Партнёр по проекту X — Иван Петров, общаемся в Telegram, любит короткие сообщения.</code>\n"
         "<code>/learn По понедельникам утром у меня недельное планирование, не назначать встречи до 11:00.</code>\n"
         "3. /knowledge — последние добавленные заметки.\n"
-        "4. /reset — сбросить историю текущего чата (база знаний останется).\n\n"
+        "4. /reset — сбросить историю текущего чата (база знаний останется).\n"
+        "5. /model — посмотреть или сменить модель (Claude / GigaChat / YandexGPT).\n\n"
         "Чтобы ассистент отвечал только тебе, задай переменную окружения <code>ASSISTANT_OWNER_ID</code> с твоим Telegram ID."
     )
 
@@ -307,6 +308,55 @@ async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update, "Историю этого чата сбросила. Базу знаний не трогала.")
 
 
+@require_owner
+async def model_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    current = llm_provider.current_provider_name()
+    args = [a.strip().lower() for a in ctx.args if a.strip()]
+
+    if not args:
+        lines = [
+            "<b>Модель Афины</b>",
+            "",
+            f"Сейчас: <b>{escape(llm_provider.provider_label(current))}</b>",
+        ]
+        try:
+            web = "есть" if llm_provider.get_provider().supports_web else "нет"
+            lines.append(f"Веб-поиск: {web}")
+        except llm_provider.ProviderError as exc:
+            lines.append(f"⚠️ Провайдер не поднимается: {escape(str(exc))}")
+        lines += ["", "<b>Доступные</b>"]
+        for name in llm_provider.available_providers():
+            mark = " ← текущая" if name == current else ""
+            lines.append(f"- <code>{name}</code> — {escape(llm_provider.provider_label(name))}{mark}")
+        lines += ["", "Переключить: <code>/model gigachat</code> (или anthropic, yandex)"]
+        await reply_html(update, "\n".join(lines))
+        return
+
+    target = args[0]
+    if target == current:
+        await reply_html(
+            update, f"Уже работаю на <b>{escape(llm_provider.provider_label(current))}</b>."
+        )
+        return
+
+    try:
+        provider = llm_provider.set_provider(target)
+    except ValueError as exc:
+        await reply_html(update, escape(str(exc)))
+        return
+    except llm_provider.ProviderError as exc:
+        await reply_html(update, f"Не удалось переключиться: {escape(str(exc))}")
+        return
+
+    save_setting("provider", target)
+    web = "со встроенным веб-поиском" if provider.supports_web else "без встроенного веб-поиска"
+    await reply_html(
+        update,
+        f"Переключилась на <b>{escape(llm_provider.provider_label(target))}</b> ({web}).\n"
+        "Первый же запрос пойдёт на новую модель. Выбор сохранён и переживёт перезапуск.",
+    )
+
+
 def build_system_prompt() -> str:
     tz_name = calendar_tools.DEFAULT_TZ
     try:
@@ -341,11 +391,17 @@ def build_system_prompt() -> str:
             "Яндекс.Телемост сейчас не подключён (нет токена) — создать встречу в Телемосте не получится."
         )
 
-    parts.append(
-        "Доступ в интернет: инструменты web_search (поиск) и web_fetch (загрузка конкретной страницы). "
-        "Используй их, когда вопрос требует свежей или внешней информации (новости, цены, документация, факты после твоего обучения). "
-        "Не угадывай и не выдумывай — лучше сходи в веб."
-    )
+    if llm_provider.get_provider().supports_web:
+        parts.append(
+            "Доступ в интернет: инструменты web_search (поиск) и web_fetch (загрузка конкретной страницы). "
+            "Используй их, когда вопрос требует свежей или внешней информации (новости, цены, документация, факты после твоего обучения). "
+            "Не угадывай и не выдумывай — лучше сходи в веб."
+        )
+    else:
+        parts.append(
+            "Прямого доступа в интернет сейчас нет (у текущей модели нет встроенного веб-поиска). "
+            "Не выдумывай свежие факты, цены, новости и ссылки — если данных нет, честно скажи, что не можешь проверить онлайн."
+        )
 
     manifest = context_tools.build_manifest_for_prompt()
     if manifest:
@@ -361,55 +417,8 @@ def build_system_prompt() -> str:
 def run_with_tools(messages: list[dict[str, Any]], system: str) -> str:
     google_tools = ALL_TOOL_SCHEMAS if google_auth.is_configured() else []
     telemost_schemas = telemost_tools.TOOL_SCHEMAS if telemost_tools.is_configured() else []
-    tools = google_tools + telemost_schemas + WEB_TOOLS
-    convo: list[dict[str, Any]] = list(messages)
-
-    for _ in range(MAX_TOOL_ITERATIONS):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=4096,
-            system=system,
-            messages=convo,
-            tools=tools,
-        )
-
-        if response.stop_reason == "pause_turn":
-            convo.append({"role": "assistant", "content": response.content})
-            continue
-
-        if response.stop_reason != "tool_use":
-            return "".join(
-                block.text for block in response.content if getattr(block, "type", None) == "text"
-            ).strip()
-
-        convo.append({"role": "assistant", "content": response.content})
-
-        tool_results = []
-        for block in response.content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-            try:
-                result = dispatch_tool(block.name, dict(block.input))
-                content = json.dumps(result, ensure_ascii=False, default=str)
-                tool_results.append(
-                    {"type": "tool_result", "tool_use_id": block.id, "content": content}
-                )
-            except Exception as exc:
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": f"Ошибка инструмента {block.name}: {exc}",
-                        "is_error": True,
-                    }
-                )
-
-        if not tool_results:
-            continue
-
-        convo.append({"role": "user", "content": tool_results})
-
-    return "Не получилось завершить запрос — слишком много шагов с инструментами. Попробуй сформулировать иначе."
+    tools = google_tools + telemost_schemas
+    return llm_provider.get_provider().run(messages, system, tools, dispatch_tool)
 
 
 @require_owner
@@ -425,10 +434,10 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         answer = await asyncio.to_thread(run_with_tools, messages, system)
-    except (anthropic.APIStatusError, anthropic.APIConnectionError):
-        logging.exception("Сбой Anthropic API при обработке сообщения")
+    except llm_provider.ProviderError:
+        logging.exception("Временный сбой LLM-провайдера при обработке сообщения")
         await update.message.reply_text(
-            "Сервис модели сейчас недоступен (временный сбой на стороне Anthropic). "
+            "Сервис модели сейчас недоступен (временный сбой на стороне провайдера). "
             "Попробуй отправить запрос ещё раз через минуту."
         )
         return
@@ -447,12 +456,25 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     ensure_data_files()
+
+    saved_provider = load_settings().get("provider")
+    if saved_provider:
+        try:
+            llm_provider.set_provider(saved_provider)
+        except Exception:
+            logging.exception(
+                "Не удалось применить сохранённого провайдера %s — работаю на провайдере по умолчанию",
+                saved_provider,
+            )
+    logging.info("Активный LLM-провайдер: %s", llm_provider.current_provider_name())
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("learn", learn))
     app.add_handler(CommandHandler("knowledge", knowledge))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("model", model_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.run_polling()
 
