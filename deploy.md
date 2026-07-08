@@ -31,10 +31,11 @@ sudo -u akbot .venv/bin/pip install -r requirements.txt
 Создайте `/opt/akbot/app/.env` (НЕ коммитится — в `.gitignore`):
 
 ```ini
+LLM_PROVIDER=anthropic
 ANTHROPIC_KEY=sk-ant-...
 TELEGRAM_TOKEN=123456:ABC...
 ASSISTANT_OWNER_ID=...
-ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MODEL=claude-sonnet-5
 GOOGLE_REFRESH_TOKEN=...
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
@@ -49,13 +50,25 @@ chmod 600 /opt/akbot/app/.env
 
 | Переменная | Обязательна | Назначение |
 |---|---|---|
-| `ANTHROPIC_KEY` | да | ключ Anthropic API |
+| `LLM_PROVIDER` | — | модель по умолчанию при старте: `anthropic` (по умолчанию), `gigachat`, `yandex`. На лету переключается командой `/model` в боте, выбор сохраняется в `data/settings.json` и переживает перезапуск |
 | `TELEGRAM_TOKEN` | да | токен бота от @BotFather |
 | `ASSISTANT_OWNER_ID` | — | Telegram ID владельца (ограничение доступа) |
-| `ANTHROPIC_MODEL` | — | по умолчанию `claude-sonnet-4-6` |
 | `GOOGLE_REFRESH_TOKEN` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | для Google-инструментов | OAuth для Calendar/Drive/Docs/Sheets/Slides |
 | `GOOGLE_CALENDAR_ID` / `GOOGLE_CALENDAR_TZ` | — | по умолчанию `primary` / `Europe/Moscow` |
 | `YANDEX_TELEMOST_TOKEN` | для Телемоста | OAuth-токен Yandex |
+
+Ключи модели — только для выбранного `LLM_PROVIDER`:
+
+| Провайдер | Переменные | Заметки |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_KEY` (обяз.), `ANTHROPIC_MODEL` (по умолч. `claude-sonnet-5`) | единственный провайдер со встроенным веб-поиском (`web_search`/`web_fetch`) |
+| `gigachat` | `GIGACHAT_AUTH_KEY` (обяз.), `GIGACHAT_SCOPE` (по умолч. `GIGACHAT_API_PERS`), `GIGACHAT_MODEL` (по умолч. `GigaChat-Max`), `GIGACHAT_CA_BUNDLE` (путь к корневому сертификату Минцифры) | без встроенного веб-поиска; TLS требует CA Минцифры |
+| `yandex` | `YANDEX_API_KEY` + `YANDEX_FOLDER_ID` (обяз.), `YANDEX_MODEL` (по умолч. `yandexgpt/latest`) | без встроенного веб-поиска |
+
+> ⚠️ Провайдеры `gigachat` и `yandex` собраны по документированному OpenAI-совместимому
+> контракту, но не обкатаны на живом API. Перед боевым переключением прогоните реальные
+> сценарии (календарь → свободное окно → Телемост → запись события) и сверьте `base_url`
+> и схему авторизации с актуальной докой провайдера. `anthropic` — проверенный путь.
 
 ## 4. systemd-сервис
 
@@ -77,6 +90,7 @@ cd /opt/akbot/app && sudo -u akbot git pull && systemctl restart akbot
 
 ## Состояние
 
-Каталог `data/` (`knowledge_base.json`, `chat_memory.json`) создаётся
-автоматически при первом запуске и хранится только на сервере (в `.gitignore`).
+Каталог `data/` (`knowledge_base.json`, `chat_memory.json`, `settings.json`)
+создаётся автоматически при первом запуске и хранится только на сервере (в
+`.gitignore`). `settings.json` помнит выбранного через `/model` провайдера.
 Для бэкапа базы знаний копируйте `data/` отдельно.

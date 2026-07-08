@@ -1,4 +1,5 @@
 anthropic
+openai
 python-telegram-bot
 httpx
 gspread
