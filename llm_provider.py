@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Callable, Protocol
@@ -59,6 +60,22 @@ class LLMProvider(Protocol):
         dispatch: Dispatch,
     ) -> str:
         ...
+
+
+# Некоторые модели (напр. GigaChat) любят проговаривать вызовы инструментов прямо
+# в финальном тексте: «create_event аргументы: {…}». Структурные вызовы при этом
+# отрабатывают нормально, но этот «отчёт» не должен попадать пользователю. Вырезаем
+# его как страховку поверх запрета в системном промпте. Паттерн узкий: <имя> <слово>
+# : {плоский-json}, чтобы не задеть обычный текст.
+_TOOL_ECHO_RE = re.compile(
+    r"[\w.\-]+[ \t]+(?:аргументы|параметры|arguments)[ \t]*:[ \t]*\{[^{}]*\}"
+)
+
+
+def _strip_tool_echo(text: str) -> str:
+    cleaned = _TOOL_ECHO_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def to_openai_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -222,7 +239,7 @@ class OpenAICompatProvider:
                 tool_calls = message.tool_calls or []
 
                 if not tool_calls:
-                    return (message.content or "").strip()
+                    return _strip_tool_echo(message.content or "")
 
                 convo.append(
                     {
